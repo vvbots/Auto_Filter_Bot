@@ -36,6 +36,25 @@ logging.getLogger("pymongo").setLevel(logging.WARNING)
 botStartTime = time.time()
 ppath = "plugins/*.py"
 files = glob.glob(ppath)
+PING_URL = os.getenv("PING_URL", "https://auto-filter-bot-2-kk0w.onrender.com")
+url = f"{PING_URL}/health"  # If you have a health check endpointAdd exponential backoff for repeated failures:
+
+async def ping():
+    url = "https://auto-filter-bot-2-kk0w.onrender.com"
+    retry_delay = 300  # Start with 5 minutes
+    max_delay = 900  # Max 15 minutes
+    
+    while True:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                async with session.get(url) as resp:
+                    print(f"✓ Ping successful: {resp.status}")
+                    retry_delay = 300  # Reset delay on success
+        except Exception as e:
+            print(f"⚠ Ping error: {e}")
+            retry_delay = min(retry_delay * 1.5, max_delay)  # Exponential backoff
+        
+        await asyncio.sleep(retry_delay)
 
 async def dreamxbotz_start():
     print('\n\nInitalizing DreamxBotz')
@@ -84,7 +103,7 @@ async def dreamxbotz_start():
     await app.setup()
     bind_address = "0.0.0.0"
     await web.TCPSite(app, bind_address, PORT).start()
-    dreamxbotz.loop.create_task(keep_alive())
+    asyncio.create_task(ping())
     await idle()
     
 if __name__ == '__main__':
