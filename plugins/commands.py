@@ -23,7 +23,7 @@ import time
 
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
-
+BOT_USERNAME = "VVFilter_bot"
 TIMEZONE = "Asia/Kolkata"
 BATCH_FILES = {}
 
@@ -31,355 +31,32 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
+from bson import ObjectId
 import os
-from typing import Dict, List
+from typing import Dict
 import asyncio
+import logging
 
-# Configuration from environment/info
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Configuration - Replace with your values
 
 # MongoDB setup
 mongo_client = AsyncIOMotorClient(DATABASE_URI)
-bd = mongo_client["vvstore"]
+bd = mongo_client["filestore"]
 files_collection = bd["files"]
 batches_collection = bd["batches"]
+downloads_collection = bd["downloads"]
 
 # Temporary storage for batch operations
 batch_sessions: Dict[int, Dict] = {}
 
-
-class FileHandler:
-    """Handle file operations and link generation"""
-    
-    @staticmethod
-    async def store_file(message: Message, user_id: int) -> dict:
-        """Store file information in database"""
-        file_info = {
-            "user_id": user_id,
-            "file_id": None,
-            "file_unique_id": None,
-            "file_name": None,
-            "file_size": 0,
-            "mime_type": None,
-            "caption": message.caption,
-            "message_id": message.id,
-            "channel_message_id": None,
-            "timestamp": datetime.utcnow(),
-            "file_type": None
-        }
-        
-        # Detect file type and extract info
-        if message.document:
-            file_info.update({
-                "file_id": message.document.file_id,
-                "file_unique_id": message.document.file_unique_id,
-                "file_name": message.document.file_name,
-                "file_size": message.document.file_size,
-                "mime_type": message.document.mime_type,
-                "file_type": "document"
-            })
-        elif message.video:
-            file_info.update({
-                "file_id": message.video.file_id,
-                "file_unique_id": message.video.file_unique_id,
-                "file_name": message.video.file_name or "video.mp4",
-                "file_size": message.video.file_size,
-                "mime_type": message.video.mime_type,
-                "file_type": "video"
-            })
-        elif message.audio:
-            file_info.update({
-                "file_id": message.audio.file_id,
-                "file_unique_id": message.audio.file_unique_id,
-                "file_name": message.audio.file_name or "audio.mp3",
-                "file_size": message.audio.file_size,
-                "mime_type": message.audio.mime_type,
-                "file_type": "audio"
-            })
-        elif message.photo:
-            photo = message.photo
-            file_info.update({
-                "file_id": photo.file_id,
-                "file_unique_id": photo.file_unique_id,
-                "file_name": f"photo_{photo.file_unique_id}.jpg",
-                "file_size": photo.file_size,
-                "mime_type": "image/jpeg",
-                "file_type": "photo"
-            })
-        
-        # Insert into database
-        result = await files_collection.insert_one(file_info)
-        file_info["_id"] = str(result.inserted_id)
-        
-        return file_info
-    
-    @staticmethod
-    async def forward_to_channel(client: Client, message: Message) -> int:
-        """Forward message to storage channel and return message ID"""
-        if not CHANNELS:
-            return None
-        
-        channel_id = CHANNELS[0]  # Use first channel
-        forwarded = await message.copy(channel_id)
-        return forwarded.id
-    
-    @staticmethod
-    async def generate_link(file_id: str, base_url: str = f"https://t.me/{temp.U_NAME}?start=") -> str:
-        """Generate shareable link for file"""
-        return f"{base_url}file_{file_id}"
-    
-    @staticmethod
-    async def generate_batch_link(batch_id: str, base_url: str = f"https://t.me/{temp.U_NAME}?start=") -> str:
-        """Generate shareable link for batch"""
-        return f"{base_url}batch_{batch_id}"
+# Initialize bot
+app = Client
 
 
-@Client.on_message(filters.private & filters.media & filters.user(ADMINS))
-async def handle_incoming_media(client: Client, message: Message):
-    """Handle incoming media from admins"""
-    
-    try:
-        user_id = message.from_user.id
-        
-        # Check if user is in batch mode
-        if user_id in batch_sessions and batch_sessions[user_id].get("active"):
-            try:
-                # Add to batch
-                file_info = await FileHandler.store_file(message, user_id)
-                batch_sessions[user_id]["files"].append(file_info)
-                
-                file_count = len(batch_sessions[user_id]["files"])
-                await message.reply_text(
-                    f"✅ **File {file_count} added to batch**\n\n"
-                    f"📁 {file_info['file_name']}\n"
-                    f"💾 Size: {FileHandler.format_size(file_info['file_size'])}\n\n"
-                    f"Send more files or click **Done** below.",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ Done - Generate Link", callback_data=f"batch_done_{user_id}")]
-                    ])
-                )
-                return
-            except Exception as e:
-                logger.error(f"Error adding file to batch for user {user_id}: {e}")
-                await message.reply_text(
-                    "❌ **Error adding file to batch**\n\n"
-                    "Please try again or start a new batch."
-                )
-                return
-        
-        # First media received - show options
-        try:
-            file_info = await FileHandler.store_file(message, user_id)
-        except Exception as e:
-            logger.error(f"Error storing file for user {user_id}: {e}")
-            await message.reply_text(
-                "❌ **Error processing your file**\n\n"
-                "The file could not be stored. Please try again."
-            )
-            return
-        
-        # Initialize batch session for this user
-        try:
-            batch_sessions[user_id] = {
-                "active": False,
-                "files": [file_info],
-                "timestamp": datetime.utcnow()
-            }
-            
-            buttons = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📄 Single File", callback_data=f"single_{file_info['_id']}"),
-                    InlineKeyboardButton("📦 Batch Files", callback_data=f"batch_start_{user_id}")
-                ]
-            ])
-            
-            await message.reply_text(
-                f"📥 **Media Received!**\n\n"
-                f"📁 {file_info['file_name']}\n"
-                f"💾 Size: {FileHandler.format_size(file_info['file_size'])}\n"
-                f"📝 Type: {file_info['file_type'].upper()}\n\n"
-                f"**Choose an option:**\n"
-                f"• Single File - Generate link for this file only\n"
-                f"• Batch Files - Add more files and create one link",
-                reply_markup=buttons
-            )
-        except Exception as e:
-            logger.error(f"Error creating batch session or sending response for user {user_id}: {e}")
-            await message.reply_text(
-                "❌ **Error creating session**\n\n"
-                "Your file was stored but there was an error setting up the session. "
-                "Please try sending the file again."
-            )
-            return
-            
-    except Exception as e:
-        logger.error(f"Unexpected error in handle_incoming_media: {e}")
-        try:
-            await message.reply_text(
-                "❌ **An unexpected error occurred**\n\n"
-                "Please try again later or contact support if the issue persists."
-            )
-        except:
-            # If even the error message fails to send, just log it
-            logger.error(f"Failed to send error message to user")
-
-
-@Client.on_callback_query(filters.regex(r"^single_"))
-async def handle_single_file(client: Client, callback: CallbackQuery):
-    """Generate single file link"""
-    
-    file_id = callback.data.split("_", 1)[1]
-    user_id = callback.from_user.id
-    
-    # Clear batch session
-    if user_id in batch_sessions:
-        del batch_sessions[user_id]
-    
-    await callback.message.edit_text("⏳ Generating link...")
-    
-    # Forward to channel for permanent storage
-    file_doc = await files_collection.find_one({"_id": file_id})
-    
-    if CHANNELS:
-        try:
-            # Get original message and forward
-            original_msg = await client.get_messages(
-                callback.message.chat.id,
-                file_doc["message_id"]
-            )
-            channel_msg_id = await FileHandler.forward_to_channel(client, original_msg)
-            
-            # Update database with channel message ID
-            await files_collection.update_one(
-                {"_id": file_id},
-                {"$set": {"channel_message_id": channel_msg_id}}
-            )
-        except Exception as e:
-            print(f"Error forwarding to channel: {e}")
-    
-    # Generate link
-    link = await FileHandler.generate_link(file_id)
-    
-    await callback.message.edit_text(
-        f"✅ **Single File Link Generated!**\n\n"
-        f"📁 {file_doc['file_name']}\n"
-        f"💾 {FileHandler.format_size(file_doc['file_size'])}\n\n"
-        f"🔗 **Link:**\n`{link}`\n\n"
-        f"📋 Tap to copy the link",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Open Link", url=link)]
-        ])
-    )
-
-
-@Client.on_callback_query(filters.regex(r"^batch_start_"))
-async def handle_batch_start(client: Client, callback: CallbackQuery):
-    """Start batch mode"""
-    
-    user_id = int(callback.data.split("_", 2)[2])
-    
-    if user_id not in batch_sessions:
-        await callback.answer("Session expired. Please send files again.", show_alert=True)
-        return
-    
-    # Activate batch mode
-    batch_sessions[user_id]["active"] = True
-    
-    file_count = len(batch_sessions[user_id]["files"])
-    
-    await callback.message.edit_text(
-        f"📦 **Batch Mode Activated!**\n\n"
-        f"✅ {file_count} file(s) already added\n\n"
-        f"📤 Send all files you want to include in this batch.\n"
-        f"When finished, click **Done** to generate the batch link.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Done - Generate Link", callback_data=f"batch_done_{user_id}")]
-        ])
-    )
-    
-    await callback.answer("Batch mode activated! Send files now.", show_alert=False)
-
-
-@Client.on_callback_query(filters.regex(r"^batch_done_"))
-async def handle_batch_done(client: Client, callback: CallbackQuery):
-    """Complete batch and generate link"""
-    
-    user_id = int(callback.data.split("_", 2)[2])
-    
-    if user_id not in batch_sessions:
-        await callback.answer("Session expired.", show_alert=True)
-        return
-    
-    await callback.message.edit_text("⏳ Processing batch and generating link...")
-    
-    batch_data = batch_sessions[user_id]
-    files = batch_data["files"]
-    
-    # Forward all files to channel if configured
-    if CHANNELS:
-        for file_info in files:
-            try:
-                original_msg = await client.get_messages(
-                    callback.message.chat.id,
-                    file_info["message_id"]
-                )
-                channel_msg_id = await FileHandler.forward_to_channel(client, original_msg)
-                
-                # Update file with channel message ID
-                await files_collection.update_one(
-                    {"_id": file_info["_id"]},
-                    {"$set": {"channel_message_id": channel_msg_id}}
-                )
-            except Exception as e:
-                print(f"Error forwarding file {file_info['_id']}: {e}")
-    
-    # Create batch document
-    batch_doc = {
-        "user_id": user_id,
-        "file_ids": [f["_id"] for f in files],
-        "file_count": len(files),
-        "total_size": sum(f["file_size"] for f in files),
-        "created_at": datetime.utcnow(),
-        "files_info": [{
-            "id": f["_id"],
-            "name": f["file_name"],
-            "size": f["file_size"],
-            "type": f["file_type"]
-        } for f in files]
-    }
-    
-    result = await batches_collection.insert_one(batch_doc)
-    batch_id = str(result.inserted_id)
-    
-    # Generate batch link
-    link = await FileHandler.generate_batch_link(batch_id)
-    
-    # Create file list
-    files_list = "\n".join([
-        f"{i+1}. 📁 {f['file_name']} ({FileHandler.format_size(f['file_size'])})"
-        for i, f in enumerate(files)
-    ])
-    
-    total_size = FileHandler.format_size(batch_doc["total_size"])
-    
-    await callback.message.edit_text(
-        f"✅ **Batch Link Generated!**\n\n"
-        f"📦 **Batch Details:**\n"
-        f"📊 Files: {len(files)}\n"
-        f"💾 Total Size: {total_size}\n\n"
-        f"**Files in batch:**\n{files_list}\n\n"
-        f"🔗 **Link:**\n`{link}`\n\n"
-        f"📋 Tap to copy • Share this link to access all files",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Open Batch Link", url=link)]
-        ])
-    )
-    
-    # Clear batch session
-    del batch_sessions[user_id]
-
-
-# Utility methods
 def format_size(size_bytes: int) -> str:
     """Format file size to human readable format"""
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -388,45 +65,412 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024.0
     return f"{size_bytes:.2f} PB"
 
-# Add format_size to FileHandler class
-FileHandler.format_size = staticmethod(format_size)
+
+async def get_file_info(message: Message) -> dict:
+    """Extract file information from message"""
+    file_info = {
+        "file_id": None,
+        "file_unique_id": None,
+        "file_name": None,
+        "file_size": 0,
+        "mime_type": None,
+        "file_type": None
+    }
+    
+    if message.document:
+        file_info.update({
+            "file_id": message.document.file_id,
+            "file_unique_id": message.document.file_unique_id,
+            "file_name": message.document.file_name,
+            "file_size": message.document.file_size,
+            "mime_type": message.document.mime_type,
+            "file_type": "document"
+        })
+    elif message.video:
+        file_info.update({
+            "file_id": message.video.file_id,
+            "file_unique_id": message.video.file_unique_id,
+            "file_name": message.video.file_name or "video.mp4",
+            "file_size": message.video.file_size,
+            "mime_type": message.video.mime_type,
+            "file_type": "video"
+        })
+    elif message.audio:
+        file_info.update({
+            "file_id": message.audio.file_id,
+            "file_unique_id": message.audio.file_unique_id,
+            "file_name": message.audio.file_name or "audio.mp3",
+            "file_size": message.audio.file_size,
+            "mime_type": message.audio.mime_type,
+            "file_type": "audio"
+        })
+    elif message.photo:
+        photo = message.photo
+        file_info.update({
+            "file_id": photo.file_id,
+            "file_unique_id": photo.file_unique_id,
+            "file_name": f"photo_{photo.file_unique_id}.jpg",
+            "file_size": photo.file_size,
+            "mime_type": "image/jpeg",
+            "file_type": "photo"
+        })
+    
+    return file_info
 
 
-# Cleanup old batch sessions (run periodically)
-async def cleanup_expired_sessions():
-    """Remove expired batch sessions after 1 hour"""
-    while True:
-        await asyncio.sleep(3600)  # Check every hour
-        current_time = datetime.utcnow()
-        
-        expired_users = []
-        for user_id, session in batch_sessions.items():
-            time_diff = (current_time - session["timestamp"]).total_seconds()
-            if time_diff > 3600:  # 1 hour
-                expired_users.append(user_id)
-        
-        for user_id in expired_users:
-            del batch_sessions[user_id]
-            print(f"Cleaned up expired session for user {user_id}")
+# ==================== STEP 1: RECEIVE FILE & ASK SINGLE/MULTI ====================
 
-
-# Start cleanup task when bot starts
-async def start_cleanup_task(client: Client):
-    """Start the cleanup task"""
-    asyncio.create_task(cleanup_expired_sessions())
-
-
-# ==================== FILE RETRIEVAL SYSTEM ====================
-
-
-
-
-async def send_single_file(client: Client, message: Message, file_id: str, user_id: int):
-    """Send a single file to user"""
+@app.on_message(filters.private & filters.media & filters.user(ADMINS))
+async def handle_incoming_media(client: Client, message: Message):
+    """Handle incoming media from admins"""
     
     try:
-        # Find file in database
-        file_doc = await files_collection.find_one({"_id": file_id})
+        user_id = message.from_user.id
+        
+        # Check if user is in batch mode (already collecting files)
+        if user_id in batch_sessions and batch_sessions[user_id].get("active"):
+            # Add file to batch
+            file_info = await get_file_info(message)
+            file_info["message"] = message  # Store message object temporarily
+            batch_sessions[user_id]["files"].append(file_info)
+            
+            file_count = len(batch_sessions[user_id]["files"])
+            await message.reply_text(
+                f"✅ **File {file_count} added to batch**\n\n"
+                f"📁 {file_info['file_name']}\n"
+                f"💾 Size: {format_size(file_info['file_size'])}\n\n"
+                f"Send more files or click **Done** below.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Done - Generate Link", callback_data=f"batch_done_{user_id}")]
+                ])
+            )
+            return
+        
+        # First file - Ask single or multi
+        file_info = await get_file_info(message)
+        file_info["message"] = message  # Store message object
+        
+        # Initialize batch session
+        batch_sessions[user_id] = {
+            "active": False,
+            "files": [file_info],
+            "timestamp": datetime.utcnow()
+        }
+        
+        buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📄 Single File", callback_data=f"single_{user_id}"),
+                InlineKeyboardButton("📦 Multi Files", callback_data=f"multi_start_{user_id}")
+            ]
+        ])
+        
+        await message.reply_text(
+            f"📥 **Media Received!**\n\n"
+            f"📁 {file_info['file_name']}\n"
+            f"💾 Size: {format_size(file_info['file_size'])}\n"
+            f"📝 Type: {file_info['file_type'].upper()}\n\n"
+            f"**Choose an option:**\n"
+            f"• Single File - Generate link for this file only\n"
+            f"• Multi Files - Add more files and create one link",
+            reply_markup=buttons
+        )
+            
+    except Exception as e:
+        logger.error(f"Error in handle_incoming_media: {e}", exc_info=True)
+        await message.reply_text("❌ An error occurred. Please try again.")
+
+
+# ==================== STEP 2: SINGLE FILE - FORWARD TO CHANNEL, STORE, GENERATE LINK ====================
+
+@app.on_callback_query(filters.regex(r"^single_"))
+async def handle_single_file(client: Client, callback: CallbackQuery):
+    """Handle single file: forward to channel, store in DB, generate link"""
+    
+    try:
+        user_id = int(callback.data.split("_")[1])
+        
+        if user_id not in batch_sessions:
+            await callback.answer("Session expired. Please send file again.", show_alert=True)
+            return
+        
+        await callback.message.edit_text("⏳ **Processing...**\n\nForwarding file to storage...")
+        
+        # Get the file
+        file_info = batch_sessions[user_id]["files"][0]
+        original_message = file_info["message"]
+        
+        # STEP 1: Forward to channel and get channel message ID
+        if not CHANNELS:
+            await callback.message.edit_text("❌ Storage channel not configured!")
+            return
+        
+        channel_id = CHANNELS[0]
+        try:
+            # Forward message to channel
+            forwarded_msg = await original_message.copy(channel_id)
+            channel_msg_id = forwarded_msg.id
+            logger.info(f"File forwarded to channel {channel_id}, message ID: {channel_msg_id}")
+        except Exception as e:
+            logger.error(f"Error forwarding to channel: {e}", exc_info=True)
+            await callback.message.edit_text(f"❌ Error forwarding to storage channel: {e}")
+            return
+        
+        # STEP 2: Store in database with channel message ID
+        file_doc = {
+            "user_id": user_id,
+            "file_id": file_info["file_id"],
+            "file_unique_id": file_info["file_unique_id"],
+            "file_name": file_info["file_name"],
+            "file_size": file_info["file_size"],
+            "mime_type": file_info["mime_type"],
+            "file_type": file_info["file_type"],
+            "caption": original_message.caption,
+            "channel_id": channel_id,
+            "channel_msg_id": channel_msg_id,  # Store channel message ID
+            "is_batch": False,
+            "created_at": datetime.utcnow()
+        }
+        
+        result = await files_collection.insert_one(file_doc)
+        store_id = str(result.inserted_id)  # This is our unique store ID
+        
+        logger.info(f"File stored in DB with ID: {store_id}")
+        
+        # STEP 3: Generate link with store ID
+        link = f"https://t.me/{BOT_USERNAME}?start=file_{store_id}"
+        
+        # Clear session
+        del batch_sessions[user_id]
+        
+        # Send success message with link
+        await callback.message.edit_text(
+            f"✅ **Single File Link Generated!**\n\n"
+            f"📁 {file_info['file_name']}\n"
+            f"💾 {format_size(file_info['file_size'])}\n"
+            f"📝 Type: {file_info['file_type'].upper()}\n\n"
+            f"🔗 **Share Link:**\n`{link}`\n\n"
+            f"📋 Tap to copy the link",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Open Link", url=link)]
+            ])
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in handle_single_file: {e}", exc_info=True)
+        await callback.message.edit_text(f"❌ Error: {e}")
+
+
+# ==================== STEP 3: MULTI FILES - START BATCH MODE ====================
+
+@app.on_callback_query(filters.regex(r"^multi_start_"))
+async def handle_multi_start(client: Client, callback: CallbackQuery):
+    """Start multi/batch mode"""
+    
+    try:
+        user_id = int(callback.data.split("_")[2])
+        
+        if user_id not in batch_sessions:
+            await callback.answer("Session expired. Please send files again.", show_alert=True)
+            return
+        
+        # Activate batch mode
+        batch_sessions[user_id]["active"] = True
+        
+        file_count = len(batch_sessions[user_id]["files"])
+        
+        await callback.message.edit_text(
+            f"📦 **Multi-File Mode Activated!**\n\n"
+            f"✅ {file_count} file(s) already added\n\n"
+            f"📤 Send all files you want to include.\n"
+            f"When finished, click **Done** to generate the link.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Done - Generate Link", callback_data=f"batch_done_{user_id}")]
+            ])
+        )
+        
+        await callback.answer("Multi-file mode activated! Send files now.")
+        
+    except Exception as e:
+        logger.error(f"Error in handle_multi_start: {e}", exc_info=True)
+        await callback.answer("Error activating batch mode", show_alert=True)
+
+
+# ==================== STEP 4: BATCH DONE - FORWARD ALL, STORE, GENERATE LINK ====================
+
+@app.on_callback_query(filters.regex(r"^batch_done_"))
+async def handle_batch_done(client: Client, callback: CallbackQuery):
+    """Complete batch: forward all files to channel, store in DB, generate link"""
+    
+    try:
+        user_id = int(callback.data.split("_")[2])
+        
+        if user_id not in batch_sessions:
+            await callback.answer("Session expired.", show_alert=True)
+            return
+        
+        files = batch_sessions[user_id]["files"]
+        
+        if len(files) == 0:
+            await callback.answer("No files to process!", show_alert=True)
+            return
+        
+        await callback.message.edit_text(
+            f"⏳ **Processing {len(files)} files...**\n\n"
+            f"Forwarding to storage channel..."
+        )
+        
+        if not CHANNELS:
+            await callback.message.edit_text("❌ Storage channel not configured!")
+            return
+        
+        channel_id = CHANNELS[0]
+        stored_files = []
+        
+        # STEP 1: Forward all files to channel and store each with channel msg ID
+        for idx, file_info in enumerate(files, 1):
+            try:
+                original_message = file_info["message"]
+                
+                # Forward to channel
+                forwarded_msg = await original_message.copy(channel_id)
+                channel_msg_id = forwarded_msg.id
+                
+                # Store individual file in DB
+                file_doc = {
+                    "user_id": user_id,
+                    "file_id": file_info["file_id"],
+                    "file_unique_id": file_info["file_unique_id"],
+                    "file_name": file_info["file_name"],
+                    "file_size": file_info["file_size"],
+                    "mime_type": file_info["mime_type"],
+                    "file_type": file_info["file_type"],
+                    "caption": original_message.caption,
+                    "channel_id": channel_id,
+                    "channel_msg_id": channel_msg_id,  # Individual channel message ID
+                    "is_batch": True,
+                    "created_at": datetime.utcnow()
+                }
+                
+                result = await files_collection.insert_one(file_doc)
+                file_store_id = str(result.inserted_id)
+                
+                stored_files.append({
+                    "store_id": file_store_id,
+                    "name": file_info["file_name"],
+                    "size": file_info["file_size"],
+                    "type": file_info["file_type"],
+                    "channel_msg_id": channel_msg_id
+                })
+                
+                logger.info(f"File {idx}/{len(files)} stored: {file_store_id}")
+                
+            except Exception as e:
+                logger.error(f"Error processing file {idx}: {e}", exc_info=True)
+                continue
+        
+        if len(stored_files) == 0:
+            await callback.message.edit_text("❌ Failed to store any files!")
+            return
+        
+        # STEP 2: Create batch document with all store IDs
+        batch_doc = {
+            "user_id": user_id,
+            "file_store_ids": [f["store_id"] for f in stored_files],  # Store IDs of individual files
+            "file_count": len(stored_files),
+            "total_size": sum(f["size"] for f in stored_files),
+            "channel_id": channel_id,
+            "files_info": stored_files,
+            "created_at": datetime.utcnow()
+        }
+        
+        result = await batches_collection.insert_one(batch_doc)
+        batch_store_id = str(result.inserted_id)  # This is our batch store ID
+        
+        logger.info(f"Batch created with ID: {batch_store_id}")
+        
+        # STEP 3: Generate link with batch store ID
+        link = f"https://t.me/{BOT_USERNAME}?start=batch_{batch_store_id}"
+        
+        # Create file list
+        files_list = "\n".join([
+            f"{i+1}. 📁 {f['name']} ({format_size(f['size'])})"
+            for i, f in enumerate(stored_files)
+        ])
+        
+        total_size = format_size(batch_doc["total_size"])
+        
+        await callback.message.edit_text(
+            f"✅ **Batch Link Generated!**\n\n"
+            f"📦 **Batch Details:**\n"
+            f"📊 Files: {len(stored_files)}\n"
+            f"💾 Total Size: {total_size}\n\n"
+            f"**Files in batch:**\n{files_list}\n\n"
+            f"🔗 **Share Link:**\n`{link}`\n\n"
+            f"📋 Tap to copy • Share this link to access all files",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Open Batch Link", url=link)]
+            ])
+        )
+        
+        # Clear batch session
+        del batch_sessions[user_id]
+        
+    except Exception as e:
+        logger.error(f"Error in handle_batch_done: {e}", exc_info=True)
+        await callback.message.edit_text(f"❌ Error: {e}")
+
+
+# ==================== STEP 5: RETRIEVE FILES - EXTRACT STORE ID AND SEND ====================
+
+@app.on_message(filters.private & filters.command("start"))
+async def handle_start(client: Client, message: Message):
+    """Handle /start command and file/batch retrieval"""
+    
+    try:
+        user_id = message.from_user.id
+        
+        # Check if there's a parameter (file_xxx or batch_xxx)
+        if len(message.command) < 2:
+            # Normal start message
+            await message.reply_text(
+                f"👋 **Welcome to File Store Bot!**\n\n"
+                f"📤 Send me files to store and get shareable links.\n\n"
+                f"🔗 Use links to access stored files anytime!"
+            )
+            return
+        
+        param = message.command[1]
+        
+        # Handle file retrieval: file_STOREID
+        if param.startswith("file_"):
+            store_id = param.replace("file_", "")
+            await send_single_file(client, message, store_id, user_id)
+            return
+        
+        # Handle batch retrieval: batch_STOREID
+        if param.startswith("batch_"):
+            store_id = param.replace("batch_", "")
+            await send_batch_files(client, message, store_id, user_id)
+            return
+        
+        await message.reply_text("❌ Invalid link format!")
+        
+    except Exception as e:
+        logger.error(f"Error in handle_start: {e}", exc_info=True)
+        await message.reply_text("❌ An error occurred!")
+
+
+async def send_single_file(client: Client, message: Message, store_id: str, user_id: int):
+    """Send a single file using store ID"""
+    
+    try:
+        # Validate ObjectId format
+        if not ObjectId.is_valid(store_id):
+            await message.reply_text("❌ Invalid file ID!")
+            return
+        
+        # Find file in database using store ID
+        file_doc = await files_collection.find_one({"_id": ObjectId(store_id)})
         
         if not file_doc:
             await message.reply_text(
@@ -435,54 +479,59 @@ async def send_single_file(client: Client, message: Message, file_id: str, user_
             )
             return
         
-        # Send processing message
         status_msg = await message.reply_text("⏳ **Fetching your file...**")
         
-        # Get file from channel if available
-        if file_doc.get("channel_message_id") and CHANNELS:
-            try:
-                channel_id = CHANNELS[0]
-                file_message = await client.get_messages(
-                    channel_id,
-                    file_doc["channel_message_id"]
-                )
-                
-                # Forward/copy the file to user
-                await file_message.copy(
-                    message.chat.id,
-                    caption=f"📁 **{file_doc['file_name']}**\n\n"
-                            f"💾 Size: {FileHandler.format_size(file_doc['file_size'])}\n"
-                            f"📝 Type: {file_doc['file_type'].upper()}\n\n"
-                            f"{file_doc.get('caption', '')}"
-                )
-                
-                await status_msg.delete()
-                
-                # Log the download
-                await log_download(file_id, user_id, "single")
-                
-                return
-                
-            except Exception as e:
-                print(f"Error fetching from channel: {e}")
+        # Get channel info
+        channel_id = file_doc.get("channel_id")
+        channel_msg_id = file_doc.get("channel_msg_id")
         
-        # Fallback: If channel fetch fails, inform user
-        await status_msg.edit_text(
-            "❌ **Unable to retrieve file**\n\n"
-            "The file storage may be unavailable. Please contact admin."
-        )
+        if not channel_id or not channel_msg_id:
+            await status_msg.edit_text("❌ File storage information missing!")
+            return
+        
+        try:
+            # Get message from channel using channel msg ID
+            file_message = await client.get_messages(channel_id, channel_msg_id)
+            
+            # Send file to user
+            await file_message.copy(
+                message.chat.id,
+                caption=f"📁 **{file_doc['file_name']}**\n\n"
+                        f"💾 Size: {format_size(file_doc['file_size'])}\n"
+                        f"📝 Type: {file_doc['file_type'].upper()}\n\n"
+                        f"{file_doc.get('caption', '') or ''}"
+            )
+            
+            await status_msg.delete()
+            
+            # Log download
+            await log_download(store_id, user_id, "single", 1)
+            
+            logger.info(f"File {store_id} sent to user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error fetching from channel: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"❌ **Unable to retrieve file**\n\n"
+                f"Error: {e}"
+            )
         
     except Exception as e:
-        print(f"Error in send_single_file: {e}")
-        await message.reply_text("❌ An error occurred while fetching the file.")
+        logger.error(f"Error in send_single_file: {e}", exc_info=True)
+        await message.reply_text(f"❌ Error: {e}")
 
 
-async def send_batch_files(client: Client, message: Message, batch_id: str, user_id: int):
-    """Send all files from a batch to user"""
+async def send_batch_files(client: Client, message: Message, batch_store_id: str, user_id: int):
+    """Send all files from a batch using batch store ID"""
     
     try:
-        # Find batch in database
-        batch_doc = await batches_collection.find_one({"_id": batch_id})
+        # Validate ObjectId format
+        if not ObjectId.is_valid(batch_store_id):
+            await message.reply_text("❌ Invalid batch ID!")
+            return
+        
+        # Find batch in database using batch store ID
+        batch_doc = await batches_collection.find_one({"_id": ObjectId(batch_store_id)})
         
         if not batch_doc:
             await message.reply_text(
@@ -492,7 +541,7 @@ async def send_batch_files(client: Client, message: Message, batch_id: str, user
             return
         
         file_count = batch_doc["file_count"]
-        total_size = FileHandler.format_size(batch_doc["total_size"])
+        total_size = format_size(batch_doc["total_size"])
         
         # Send batch info
         files_list = "\n".join([
@@ -508,42 +557,43 @@ async def send_batch_files(client: Client, message: Message, batch_id: str, user
             f"⏳ Sending files..."
         )
         
-        # Send all files
         sent_count = 0
         failed_count = 0
         
-        for file_id in batch_doc["file_ids"]:
+        # Get all file store IDs from batch
+        file_store_ids = batch_doc.get("file_store_ids", [])
+        
+        for file_store_id in file_store_ids:
             try:
-                file_doc = await files_collection.find_one({"_id": file_id})
+                # Get file document using store ID
+                file_doc = await files_collection.find_one({"_id": ObjectId(file_store_id)})
                 
                 if not file_doc:
                     failed_count += 1
                     continue
                 
                 # Get file from channel
-                if file_doc.get("channel_message_id") and CHANNELS:
-                    channel_id = CHANNELS[0]
-                    file_message = await client.get_messages(
-                        channel_id,
-                        file_doc["channel_message_id"]
-                    )
-                    
-                    # Send the file
-                    await file_message.copy(
-                        message.chat.id,
-                        caption=f"📁 {file_doc['file_name']}\n"
-                                f"💾 {FileHandler.format_size(file_doc['file_size'])}"
-                    )
-                    
-                    sent_count += 1
-                    
-                    # Small delay to avoid flooding
-                    await asyncio.sleep(0.5)
-                else:
+                channel_id = file_doc.get("channel_id")
+                channel_msg_id = file_doc.get("channel_msg_id")
+                
+                if not channel_id or not channel_msg_id:
                     failed_count += 1
-                    
+                    continue
+                
+                file_message = await client.get_messages(channel_id, channel_msg_id)
+                
+                # Send file to user
+                await file_message.copy(
+                    message.chat.id,
+                    caption=f"📁 {file_doc['file_name']}\n"
+                            f"💾 {format_size(file_doc['file_size'])}"
+                )
+                
+                sent_count += 1
+                await asyncio.sleep(0.5)  # Small delay
+                
             except Exception as e:
-                print(f"Error sending file {file_id}: {e}")
+                logger.error(f"Error sending file {file_store_id}: {e}", exc_info=True)
                 failed_count += 1
         
         # Send completion message
@@ -555,19 +605,21 @@ async def send_batch_files(client: Client, message: Message, batch_id: str, user
         
         await message.reply_text(status_text)
         
-        # Log the download
-        await log_download(batch_id, user_id, "batch", file_count=sent_count)
+        # Log download
+        await log_download(batch_store_id, user_id, "batch", sent_count)
+        
+        logger.info(f"Batch {batch_store_id} sent to user {user_id}: {sent_count} files")
         
     except Exception as e:
-        print(f"Error in send_batch_files: {e}")
-        await message.reply_text("❌ An error occurred while fetching the batch.")
+        logger.error(f"Error in send_batch_files: {e}", exc_info=True)
+        await message.reply_text(f"❌ Error: {e}")
 
 
-async def log_download(file_or_batch_id: str, user_id: int, download_type: str, file_count: int = 1):
+async def log_download(store_id: str, user_id: int, download_type: str, file_count: int):
     """Log download activity"""
     
     log_entry = {
-        "file_or_batch_id": file_or_batch_id,
+        "store_id": store_id,
         "user_id": user_id,
         "download_type": download_type,
         "file_count": file_count,
@@ -575,125 +627,33 @@ async def log_download(file_or_batch_id: str, user_id: int, download_type: str, 
     }
     
     try:
-        await db["downloads"].insert_one(log_entry)
+        await downloads_collection.insert_one(log_entry)
     except Exception as e:
-        print(f"Error logging download: {e}")
+        logger.error(f"Error logging download: {e}")
 
 
-# ==================== ADMIN COMMANDS ====================
+# ==================== CLEANUP OLD SESSIONS ====================
 
-@Client.on_message(filters.private & filters.command("stats") & filters.user(ADMINS))
-async def show_stats(client: Client, message: Message):
-    """Show statistics for admins"""
-    
-    try:
-        # Count files and batches
-        total_files = await files_collection.count_documents({})
-        total_batches = await batches_collection.count_documents({})
-        total_downloads = await db["downloads"].count_documents({})
+async def cleanup_expired_sessions():
+    """Remove expired batch sessions after 1 hour"""
+    while True:
+        await asyncio.sleep(3600)  # Check every hour
+        current_time = datetime.utcnow()
         
-        # Get total storage size
-        pipeline = [
-            {"$group": {"_id": None, "total_size": {"$sum": "$file_size"}}}
-        ]
-        result = await files_collection.aggregate(pipeline).to_list(1)
-        total_size = result[0]["total_size"] if result else 0
+        expired_users = []
+        for user_id, session in batch_sessions.items():
+            time_diff = (current_time - session["timestamp"]).total_seconds()
+            if time_diff > 3600:  # 1 hour
+                expired_users.append(user_id)
         
-        await message.reply_text(
-            f"📊 **Bot Statistics**\n\n"
-            f"📁 Total Files: {total_files}\n"
-            f"📦 Total Batches: {total_batches}\n"
-            f"💾 Storage Used: {FileHandler.format_size(total_size)}\n"
-            f"📥 Total Downloads: {total_downloads}\n\n"
-            f"⏰ Last Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        )
-        
-    except Exception as e:
-        await message.reply_text(f"❌ Error fetching stats: {str(e)}")
+        for user_id in expired_users:
+            del batch_sessions[user_id]
+            logger.info(f"Cleaned up expired session for user {user_id}")
 
 
-@Client.on_message(filters.private & filters.command("deleteold") & filters.user(ADMINS))
-async def delete_old_files(client: Client, message: Message):
-    """Delete files older than specified days"""
-    
-    try:
-        # Check if days parameter provided
-        if len(message.command) < 2:
-            await message.reply_text(
-                "❌ **Usage:** `/deleteold <days>`\n\n"
-                "Example: `/deleteold 30` - Delete files older than 30 days"
-            )
-            return
-        
-        days = int(message.command[1])
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
-        # Count files to delete
-        files_to_delete = await files_collection.count_documents({
-            "timestamp": {"$lt": cutoff_date}
-        })
-        
-        if files_to_delete == 0:
-            await message.reply_text(f"✅ No files older than {days} days found.")
-            return
-        
-        # Confirm deletion
-        confirm_msg = await message.reply_text(
-            f"⚠️ **Warning**\n\n"
-            f"This will delete {files_to_delete} files older than {days} days.\n\n"
-            f"Reply with `yes` to confirm.",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_delete_{days}"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
-                ]
-            ])
-        )
-        
-    except ValueError:
-        await message.reply_text("❌ Invalid number of days!")
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {str(e)}")
 
 
-@Client.on_callback_query(filters.regex(r"^confirm_delete_"))
-async def confirm_deletion(client: Client, callback: CallbackQuery):
-    """Confirm and execute file deletion"""
-    
-    if callback.from_user.id not in ADMINS:
-        await callback.answer("❌ Not authorized!", show_alert=True)
-        return
-    
-    try:
-        days = int(callback.data.split("_")[2])
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
-        # Delete files
-        result = await files_collection.delete_many({
-            "timestamp": {"$lt": cutoff_date}
-        })
-        
-        # Delete associated batches
-        batch_result = await batches_collection.delete_many({
-            "created_at": {"$lt": cutoff_date}
-        })
-        
-        await callback.message.edit_text(
-            f"✅ **Deletion Complete**\n\n"
-            f"🗑️ Deleted {result.deleted_count} files\n"
-            f"🗑️ Deleted {batch_result.deleted_count} batches\n\n"
-            f"Files older than {days} days have been removed."
-        )
-        
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Error during deletion: {str(e)}")
 
-
-@Client.on_callback_query(filters.regex(r"^cancel_delete$"))
-async def cancel_deletion(client: Client, callback: CallbackQuery):
-    """Cancel file deletion"""
-    await callback.message.edit_text("❌ Deletion cancelled.")
-        
 @Client.on_message(filters.command("start") & filters.incoming)
 async def start(client, message):
     if EMOJI_MODE:
