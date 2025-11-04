@@ -40,9 +40,9 @@ import asyncio
 
 # MongoDB setup
 mongo_client = AsyncIOMotorClient(DATABASE_URI)
-db = mongo_client["vvstore"]
-files_collection = db["files"]
-batches_collection = db["batches"]
+bd = mongo_client["vvstore"]
+files_collection = bd["files"]
+batches_collection = bd["batches"]
 
 # Temporary storage for batch operations
 batch_sessions: Dict[int, Dict] = {}
@@ -703,18 +703,21 @@ async def start(client, message):
             await message.react(emoji="⚡️", big=True)
     
     m = message
-    param = message.command[1]
+    user_id = message.from_user.id
     
-    # Check if it's a file request
-    if param.startswith("file_"):
-        file_id = param.replace("file_", "")
-        await send_single_file(client, message, file_id, user_id)
-    
-    # Check if it's a batch request
-    elif param.startswith("batch_"):
-        batch_id = param.replace("batch_", "")
-        await send_batch_files(client, message, batch_id, user_id)
-    
+    # Handle file storage system commands first
+    if len(message.command) >= 2:
+        param = message.command[1]
+        
+        # Check if it's a file request
+        if param.startswith("file_"):
+            file_id = param.replace("file_", "")
+            return await send_single_file(client, message, file_id, user_id)
+        
+        # Check if it's a batch request
+        elif param.startswith("batch_"):
+            batch_id = param.replace("batch_", "")
+            return await send_batch_files(client, message, batch_id, user_id)
     
     # Handle verification links (notcopy/sendall)
     if len(m.command) == 2 and m.command[1].startswith(('notcopy', 'sendall')):
