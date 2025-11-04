@@ -124,12 +124,12 @@ class FileHandler:
         return forwarded.id
     
     @staticmethod
-    async def generate_link(file_id: str, base_url: str = "https://t.me/your_bot?start=") -> str:
+    async def generate_link(file_id: str, base_url: str = f"https://t.me/{temp.U_NAME}?start=") -> str:
         """Generate shareable link for file"""
         return f"{base_url}file_{file_id}"
     
     @staticmethod
-    async def generate_batch_link(batch_id: str, base_url: str = "https://t.me/your_bot?start=") -> str:
+    async def generate_batch_link(batch_id: str, base_url: str = f"https://t.me/{temp.U_NAME}?start=") -> str:
         """Generate shareable link for batch"""
         return f"{base_url}batch_{batch_id}"
 
