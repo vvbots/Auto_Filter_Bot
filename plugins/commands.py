@@ -499,7 +499,8 @@ async def send_single_file(client: Client, message: Message, store_id: str, user
                 caption=f"📁 **{file_doc['file_name']}**\n\n"
                         f"💾 Size: {format_size(file_doc['file_size'])}\n"
                         f"📝 Type: {file_doc['file_type'].upper()}\n\n"
-                        f"{file_doc.get('caption', '') or ''}"
+                        f"{file_doc.get('caption', '') or ''}",
+                protect_content=True    
             )
             
             await status_msg.delete()
@@ -586,7 +587,8 @@ async def send_batch_files(client: Client, message: Message, batch_store_id: str
                 await file_message.copy(
                     message.chat.id,
                     caption=f"📁 {file_doc['file_name']}\n"
-                            f"💾 {format_size(file_doc['file_size'])}"
+                            f"💾 {format_size(file_doc['file_size'])}",
+                    protect_content=True
                 )
                 
                 sent_count += 1
